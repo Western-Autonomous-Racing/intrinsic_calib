@@ -5,21 +5,26 @@ import cv2
 
 class Calibration:
 
-    def __init__(self, bag, verify_calibration=True):
+    def __init__(self, bag, verify_calibration=True, time_offset=2, pattern_size=(7, 7), square_size=0.020):
         self.bag = bag
         self.bridge = cv_bridge.CvBridge()
         self.calib_images = []
         self.img_points = []
         self.objpoints = []
         self.test_image = None
+        self.rectified_img = None
         self.img_width = 0
         self.img_height = 0
         self.verify_calibration = verify_calibration
+        self.offset = time_offset
+        self.pattern_size = pattern_size
+        self.square_size = square_size
 
-    def calibrate_images(self, pattern_size=(6,10), square_size=0.020):
+    def calibrate_images(self):
         
-        self.get_pattern_corners(square_size, pattern_size=pattern_size)
-        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(self.objpoints, self.img_points, self.calib_images[0].shape[::-1], None, None)
+        self.get_pattern_corners(self.square_size, self.pattern_size)
+        gray = cv2.cvtColor(self.calib_images[0], cv2.COLOR_BGR2GRAY)
+        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(self.objpoints, self.img_points, gray.shape[::-1], None, None)
         
         if ret:
             print("Calibration successful.")
@@ -40,9 +45,9 @@ class Calibration:
         dst = cv2.undistort(self.test_image, mtx, dist, None, newcameramtx)
         # crop the image
         x, y, w, h = roi
-        dst = dst[y:y+h, x:x+w]
-        cv2.imshow('Undistorted Image', dst)
-        cv2.waitKey(500)
+        self.rectified_img = dst[y:y+h, x:x+w]
+        cv2.imshow('Undistorted Image', self.rectified_img)
+        cv2.waitKey(0)
 
         mean_error = 0
         for i in range(len(self.objpoints)):
@@ -50,9 +55,9 @@ class Calibration:
             error = cv2.norm(self.img_points[i], imgpoints2, cv2.NORM_L2)/len(imgpoints2)
             mean_error += error
 
-        print("Total Error: {}".format(mean_error/len(self.objpoints)))
+        print("Total Reprojection Error: {}".format(mean_error/len(self.objpoints)))
 
-    def get_pattern_corners(self, square_size, topic='/camera/image_raw', sample_size=10, pattern_size=(6, 6)):
+    def get_pattern_corners(self, square_size, pattern_size, topic='/camera/image_raw', sample_size=300):
         # Iterate over the messages in the bag file
         
         print("Getting pattern corners...")
@@ -60,9 +65,7 @@ class Calibration:
         num_frames = self.get_num_frames()
         init_image = False
         i=0
-        j=0
         floor = 0
-        frames_between = 0
 
         # termination criteria
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
@@ -70,52 +73,46 @@ class Calibration:
         objp = np.zeros((pattern_size[0]*pattern_size[1],3), np.float32)
         objp[:,:2] = np.mgrid[0:pattern_size[0],0:pattern_size[1]].T.reshape(-1,2)*square_size
 
+        duration = (self.bag.get_end_time() - self.bag.get_start_time()) - (self.offset * 2)
+        between_frames = duration / (sample_size + 1)
+
         for topic, msg, t in self.bag.read_messages(topics=[topic]):
+
             # Convert the ROS image message to OpenCV format
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            cv2.imshow('img', cv_image)
-            cv2.waitKey(1)
-            if not init_image:
-                self.img_width, self.img_height = cv_image.shape[:2]
+            if (t.to_sec() - self.bag.get_start_time()) < self.offset:
+                continue
+            
+            if i <= sample_size:
+
+                print("Getting frame {} of {}".format((i + 1), sample_size))
+                cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+
+                if i == sample_size:
+                    self.img_height, self.img_width = cv_image.shape[:2]
+                    self.test_image = cv_image
+                    break
+
                 # Check if checkerboard pattern is detected
                 gray_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-                print(t)
-                found, corners = cv2.findChessboardCorners(gray_image, pattern_size)
+                # cv2.imshow('img', gray_image)
+                # cv2.waitKey(1)
+
+                found, corners = cv2.findChessboardCorners(gray_image, pattern_size, flags=cv2.CALIB_CB_ADAPTIVE_THRESH)
+                print(found)
                 if found:
                     # Do something with the image
-                    self.calib_images.append(cv_image)
+                    print(f"Found pattern in frame {i} of {num_frames}")
                     corners2 = cv2.cornerSubPix(gray_image,corners, (11,11), (-1,-1), criteria)
+                    
+                    cv2.drawChessboardCorners(cv_image, pattern_size, corners2, found)
+                    cv2.imshow('img', cv_image)
+                    cv2.waitKey(500)
+
+                    self.calib_images.append(cv_image)
                     self.img_points.append(corners2)
                     self.objpoints.append(objp)
-                
-                    cv2.drawChessboardCorners(cv_image, pattern_size, corners2, found)
-                    # cv2.imshow('img', cv_image)
-                    # cv2.waitKey(500)
-                    init_image = True
-                    floor = i
-                    j+=1
-                    frames_between = int(num_frames / (sample_size+1))
-            else:
-                if j == sample_size - 1:
-                    self.test_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-                elif i == floor + frames_between*j:
-                    # Check if checkerboard pattern is detected
-                    gray_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-                    found, corners = cv2.findChessboardCorners(gray_image, pattern_size)
-                    if found:
-                        # Do something with the image
-                        self.calib_images.append(cv_image)
-                        corners2 = cv2.cornerSubPix(gray_image,corners, (11,11), (-1,-1), criteria)
-                        self.img_points.append(corners2)
-                        self.objpoints.append(objp)
-                    
-                        cv2.drawChessboardCorners(cv_image, pattern_size, corners2, found)
-                        # cv2.imshow('img', cv_image)
-                        # cv2.waitKey(500)
-
-                j+=1
             
-            i+=1
+                i+=1
 
         # Close the bag file
         self.bag.close()

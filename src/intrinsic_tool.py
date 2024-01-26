@@ -4,29 +4,50 @@ from calibration import Calibration
 import yaml
 import os
 import shutil
+from datetime import datetime
+import cv2
 
 
 def get_bag(bag_path):
     bag = rosbag.Bag(bag_path)
     return bag
 
-def write_cals(mtx, dist, img_height, img_width, path):
-    with open(path, 'r') as f:
-        cals = yaml.load(f, Loader=yaml.FullLoader)
+# Define a custom representer for lists
+def list_representer(dumper, data):
+    return dumper.represent_sequence(u'tag:yaml.org,2002:seq', data, flow_style=True)
 
-                        #fu     fv      u0      v0
-    cals["intrinsics"] = [mtx[0][0], mtx[1][1], mtx[0][2], mtx[1][2]]
-    cals["distortion_coeffs"] = [dist[0], dist[1], dist[0][2], dist[0][3], dist[0][4]]
-    cals["resolution"] = [img_width, img_height]
+def write_cals(mtx, dist, img_height, img_width, path):
+
+    # Register the custom representer
+    yaml.add_representer(list, list_representer)    
+
+
+    with open(path, 'r') as f:
+        cals = yaml.safe_load(f)
+
+    # Convert the values to regular floats
+    cals["cam0"]["intrinsics"] = [float(mtx[0][0]), float(mtx[1][1]), float(mtx[0][2]), float(mtx[1][2])]
+    cals["cam0"]["distortion_coeffs"] = [float(dist[0][0]), float(dist[0][1]), float(dist[0][2]), float(dist[0][3])]
+    cals["cam0"]["resolution"] = [int(img_width), int(img_height)]
 
     with open(path, "w") as f:
-        yaml.dump(cals, f)
+        yaml.dump(cals, f, default_flow_style=False, width=float("inf"))
+
+def save_imgs(path, test_img, rectified_img):
+    print("Saving images...")
+    cv2.imwrite(f"{path}/test_img.png", test_img)
+    cv2.imwrite(f"{path}/rectified_img.png", rectified_img)
 
 def create_new_cal(cal_name):
-    template_path = ".../template/chain_template.yaml"
-    output_path = f".../output_cals/{cal_name}.yaml"
+    current_datetime = datetime.now()
+    cal_folder = current_datetime.strftime("%Y-%m-%d-%TH-%M-%S")
+    
+    os.mkdir(f"../output_cals/{cal_folder}")
+    template_path = "../template/chain_template.yaml"
+    output_path = f"../output_cals/{cal_folder}/{cal_name}.yaml"
     shutil.copyfile(template_path, output_path)
-    return output_path
+    return output_path, cal_folder
+    
 
 def main():
     # Parse command line arguments
@@ -35,7 +56,8 @@ def main():
 
         parser = argparse.ArgumentParser()
         parser.add_argument('-b', '--bag', help='Path to ROS bag file')
-        parser.add_argument('-n', '--name', help='Name of calibration file (default: chain.yaml)', default='chain.yaml')
+        parser.add_argument('-s', '--save', help='Save calibration file to output_cals directory', action='store_true')
+        parser.add_argument('-n', '--name', help='Name of calibration file (default: chain.yaml)', default='chain')
 
         args = parser.parse_args()
 
@@ -44,16 +66,20 @@ def main():
         
         print("Opened bag file")
 
-        calibration = Calibration(bag)
+        calibration = Calibration(bag, args.save)
         ret, mtx, dist, rvecs, tvecs, img_height, img_width = calibration.calibrate_images()
 
         if ret:
-            if not os.path.exists(".../output_cals"):
+            if not os.path.exists("../output_cals"):
                 os.mkdir("../output_cals")
             
-            output_cal = create_new_cal(args.name)
+            output_cal, cal_folder = create_new_cal(args.name)
 
             write_cals(mtx, dist, img_height, img_width, output_cal)
+
+            if args.save:
+                save_imgs(f"../output_cals/{cal_folder}", calibration.test_image, calibration.rectified_img)
+
     except KeyboardInterrupt:
         print("Interrupted by user, shutting down")
         exit(0)
